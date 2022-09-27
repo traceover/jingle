@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stddef.h>
 
-#include "readall.c"
+#include "string_t.c"
 
 static void
 jingle_err_warn(const char* function_name, const char* message)
@@ -17,22 +17,20 @@ jingle_err_exit(const char* function_name, const char* message)
     exit(1);
 }
 
-typedef struct {
-    char  *data;
-    size_t count;
-} string_t;
-
-string_t
-jingle_read_entire_file(FILE *stream)
+static void
+fprintb(FILE *stream, char *buffer, size_t start, size_t n)
 {
-    string_t file = {0};
-
-    if (readall(stream, &file.data, &file.count) != READALL_OK) {
-        // TODO: better error message depending on the result of readall
-        jingle_err_exit(__FUNCTION__, "Could not read the file.");
+    if (n != 0) {
+        for (size_t i = start; i < start+n; ++i) {
+            printf("%02x ", buffer[i] & 0xFF);
+        }
+        putc('\n', stdout);
     }
+}
 
-    return file;
+static void
+printb(char *buffer, size_t start, size_t n) {
+    fprintb(stdout, buffer, start, n);
 }
 
 static const char *ET_NAMES[ET_NUM] = {
@@ -60,43 +58,6 @@ static const char *EI_OSABI_NAMES[256] = {
     [ELFOSABI_SYSV] = "Unix - System V",
 };
 
-static const char *SHT_NAMES[SHT_NUM] = {
-    [SHT_NULL] = "SHT_NULL",
-    [SHT_PROGBITS] = "SHT_PROGBITS",
-    [SHT_SYMTAB] = "SHT_SYMTAB",
-    [SHT_STRTAB] = "SHT_STRTAB",
-    [SHT_RELA] = "SHT_RELA",
-    [SHT_HASH] = "SHT_HASH",
-    [SHT_DYNAMIC] = "SHT_DYNAMIC",
-    [SHT_NOTE] = "SHT_NOTE",
-    [SHT_NOBITS] = "SHT_NOBITS",
-    [SHT_REL] = "SHT_REL",
-    [SHT_SHLIB] = "SHT_SHLIB",
-    [SHT_DYNSYM] = "SHT_DYNSYM",
-    [SHT_INIT_ARRAY] = "SHT_INIT_ARRAY",
-    [SHT_FINI_ARRAY] = "SHT_FINI_ARRAY",
-    [SHT_PREINIT_ARRAY] = "SHT_PREINIT_ARRAY",
-    [SHT_GROUP] = "SHT_GROUP",
-    [SHT_SYMTAB_SHNDX] = "SHT_SYMTAB_SHNDX",
-    [SHT_RELR] = "SHT_RELR",
-};
-
-static void
-fprintb(FILE *stream, char *buffer, size_t start, size_t n)
-{
-    if (n != 0) {
-        for (size_t i = start; i < start+n; ++i) {
-            printf("%02x ", buffer[i] & 0xFF);
-        }
-        putc('\n', stdout);
-    }
-}
-
-static void
-printb(char *buffer, size_t start, size_t n) {
-    fprintb(stdout, buffer, start, n);
-}
-
 void
 jingle_print_elf_header(Elf64_Ehdr *eh, string_t file, FILE *stream)
 {
@@ -122,10 +83,35 @@ jingle_print_elf_header(Elf64_Ehdr *eh, string_t file, FILE *stream)
     fprintf(stream, "  Section header string table index: %d\n", eh->e_shstrndx);
 }
 
+static const char *SHT_NAMES[SHT_NUM] = {
+    [SHT_NULL] = "SHT_NULL",
+    [SHT_PROGBITS] = "SHT_PROGBITS",
+    [SHT_SYMTAB] = "SHT_SYMTAB",
+    [SHT_STRTAB] = "SHT_STRTAB",
+    [SHT_RELA] = "SHT_RELA",
+    [SHT_HASH] = "SHT_HASH",
+    [SHT_DYNAMIC] = "SHT_DYNAMIC",
+    [SHT_NOTE] = "SHT_NOTE",
+    [SHT_NOBITS] = "SHT_NOBITS",
+    [SHT_REL] = "SHT_REL",
+    [SHT_SHLIB] = "SHT_SHLIB",
+    [SHT_DYNSYM] = "SHT_DYNSYM",
+    [SHT_INIT_ARRAY] = "SHT_INIT_ARRAY",
+    [SHT_FINI_ARRAY] = "SHT_FINI_ARRAY",
+    [SHT_PREINIT_ARRAY] = "SHT_PREINIT_ARRAY",
+    [SHT_GROUP] = "SHT_GROUP",
+    [SHT_SYMTAB_SHNDX] = "SHT_SYMTAB_SHNDX",
+    [SHT_RELR] = "SHT_RELR",
+};
+
 void
-jingle_print_section_header(Elf64_Shdr *sh, FILE *stream)
+jingle_print_section_header(Elf64_Shdr *sh, string_t strtab, FILE *stream)
 {
-    fprintf(stream, "Section header:\n");
+    if (sh->sh_type != SHT_NULL) {
+        fprintf(stream, "%s:\n", &strtab.data[sh->sh_name]);
+    } else {
+        fprintf(stream, "(null):\n");
+    }
     fprintf(stream, "  Type: %s\n", SHT_NAMES[sh->sh_type]);
     fprintf(stream, "  Flags: 0x%lx\n", sh->sh_flags);
     if (sh->sh_flags != 0) fprintf(stream, "    %s%s%s\n",
@@ -176,7 +162,7 @@ fprint_shndx(FILE *stream, int ndx)
         fprintf(stream, "XINDEX");
         break;
     default:
-        fprintf(stream, "%d", ndx);
+        fprintf(stream, "%u", ndx);
     }
 }
 
@@ -189,5 +175,5 @@ jingle_print_symbol(Elf64_Sym *sym, FILE *stream)
     fprintf(stream, "    Type: %s\n", STT_NAMES[ELF64_ST_TYPE(sym->st_info)]);
     fprintf(stream, "    Bind: %s\n", STB_NAMES[ELF64_ST_BIND(sym->st_info)]);
     fprintf(stream, "    Visibility: %s\n", STV_NAMES[sym->st_other]);
-    fprintf(stream, "    Index: "); fprint_shndx(stream, sym->st_shndx); fputc('\n', stream);
+    fprintf(stream, "    Section header index: "); fprint_shndx(stream, sym->st_shndx); fputc('\n', stream);
 }

@@ -1,16 +1,18 @@
 #include "jingle_read.c"
 #include "jingle_write.c"
+
+#define STRING_T_IMPLEMENTATION
+#include "string_t.c"
+
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
-#include <libelf.h>
-
 #define OUTPUT_FILE "output.o"
-#define INPUT_FILE "test.o"
+#define INPUT_FILE "output.o"
 
 #define TEST_PROGRAM_SIZE 23
 
-static char test_program[TEST_PROGRAM_SIZE] = {
+static char TEST_PROGRAM[TEST_PROGRAM_SIZE] = {
     0x55,
     0x48, 0x89, 0xe5,
     0x48, 0xc7, 0xc7,    0, 0, 0, 0,
@@ -20,33 +22,6 @@ static char test_program[TEST_PROGRAM_SIZE] = {
     0x5d,
     0xc3
 };
-
-void
-test_jingle_write()
-{
-    FILE *f = fopen(OUTPUT_FILE, "w");
-    if (!f) {
-        jingle_err_exit(__FUNCTION__, "Could not open file `"OUTPUT_FILE"`");
-    }
-
-    Jingle jingle = {0};
-    jingle.eh = jingle_add_header(EM_X86_64, ELFOSABI_SYSV);
-
-    Elf64_Shdr sh = {
-        .sh_type = SHT_PROGBITS,
-        .sh_flags = SHF_ALLOC | SHF_EXECINSTR,
-        .sh_size = TEST_PROGRAM_SIZE
-    };
-    jingle_add_data(&jingle, test_program, TEST_PROGRAM_SIZE, &sh.sh_offset);
-    jingle_add_section(&jingle, sh);
-
-    printf("[INFO] Generating "OUTPUT_FILE"\n");
-    jingle_write_to_file(&jingle, f);
-
-    if (f) {
-        fclose(f);
-    }
-}
 
 static void
 fprintcs(FILE *stream, char *data, size_t count)
@@ -58,6 +33,58 @@ fprintcs(FILE *stream, char *data, size_t count)
 }
 
 void
+test_jingle_write()
+{
+    FILE *f = fopen(OUTPUT_FILE, "w");
+    if (!f) {
+        jingle_err_exit(__FUNCTION__, "Could not open file `"OUTPUT_FILE"`");
+    }
+
+    Jingle jingle = {0};
+    jingle_init(&jingle, EM_X86_64, ELFOSABI_SYSV);
+
+    {
+        Elf64_Shdr sh = {
+            .sh_type = SHT_PROGBITS,
+            .sh_flags = SHF_ALLOC | SHF_EXECINSTR,
+            .sh_size = TEST_PROGRAM_SIZE,
+        };
+
+        jingle_add_code(&jingle, TEST_PROGRAM, TEST_PROGRAM_SIZE, &sh.sh_offset);
+        Elf64_Section shndx = jingle_add_section(&jingle, sh, ".text");
+
+        Elf64_Sym sym = {
+            .st_shndx = shndx,
+            .st_value = 0,
+            .st_size = 0,
+            .st_info = (STB_GLOBAL << 4) | (STT_FUNC)
+        };
+        jingle_add_symbol(&jingle, sym, "_start");
+    }
+
+    {
+        Elf64_Section shndx = jingle_add_symtab(&jingle);
+        arrlast(jingle.shs).sh_link = shndx + 1;
+        jingle_add_strtab(&jingle);
+    }
+
+    jingle_add_shstrtab(&jingle);
+
+    printf("[INFO] Generating "OUTPUT_FILE"\n");
+
+    jingle_fini(&jingle);
+    jingle_write_to_file(&jingle, f);
+
+    ds_free(&jingle.code);
+    ds_free(&jingle.strtab);
+    ds_free(&jingle.shstrtab);
+
+    if (f) {
+        fclose(f);
+    }
+}
+
+void
 test_jingle_read()
 {
     FILE *f = fopen(INPUT_FILE, "r");
@@ -65,7 +92,7 @@ test_jingle_read()
         jingle_err_exit(__FUNCTION__, "Could not open file `"INPUT_FILE"`");
     }
 
-    string_t file = jingle_read_entire_file(f);
+    string_t file = string_from_file(f);
     printf("[INFO] Read %zu bytes from "INPUT_FILE"\n", file.count);
 
     if (
@@ -86,11 +113,19 @@ test_jingle_read()
     Elf64_Ehdr *eh = ELF64_EHDR(file.data);
     jingle_print_elf_header(eh, file, stdout);
 
+    string_t strtab;
+    {
+        Elf64_Shdr *sh = ELF64_SHDR(file.data, eh->e_shstrndx);
+        strtab.data = (file.data + sh->sh_offset);
+        strtab.count = sh->sh_size;
+    }
+    assert(strtab.data != NULL);
+
     printf("Section headers (%d):\n", eh->e_shnum);
     for (size_t i = 0; i < eh->e_shnum; ++i) {
         Elf64_Shdr *sh = ELF64_SHDR(file.data, i);
-        fprintf(stdout, "[%zu]: ", i);
-        jingle_print_section_header(sh, stdout);
+        fprintf(stdout, "[%2zu] ", i);
+        jingle_print_section_header(sh, strtab, stdout);
 
         if (sh->sh_size > 0) {
             if (sh->sh_type == SHT_STRTAB) {
@@ -106,8 +141,6 @@ test_jingle_read()
                         Elf64_Shdr *strtab_sh = ELF64_SHDR(file.data, sh->sh_link);
                         char *str = &(file.data + strtab_sh->sh_offset)[sym->st_name];
                         printf("    Name: '%s'\n", str);
-                    } else {
-                        printf("    Name: %d\n", sym->st_shndx);
                     }
                 }
             } else if (sh->sh_type == SHT_PROGBITS) {
