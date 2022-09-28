@@ -8,7 +8,7 @@
 #include "stb_ds.h"
 
 #define OUTPUT_FILE "output.o"
-#define INPUT_FILE "output.o"
+#define INPUT_FILE "hello_world.o"
 
 #define TEST_PROGRAM_SIZE 23
 
@@ -22,6 +22,8 @@ static char TEST_PROGRAM[TEST_PROGRAM_SIZE] = {
     0x5d,
     0xc3
 };
+
+static char HELLO_WORLD[] = "Hello, World\n";
 
 static void
 fprintcs(FILE *stream, char *data, size_t count)
@@ -43,41 +45,31 @@ test_jingle_write()
     Jingle jingle = {0};
     jingle_init(&jingle, EM_X86_64, ELFOSABI_SYSV);
 
-    {
-        Elf64_Shdr sh = {
-            .sh_type = SHT_PROGBITS,
-            .sh_flags = SHF_ALLOC | SHF_EXECINSTR,
-            .sh_size = TEST_PROGRAM_SIZE,
-        };
+    /// Add sections
+    Elf64_Section text_section = jingle_add_text_section(&jingle, TEST_PROGRAM, TEST_PROGRAM_SIZE);
+    Elf64_Section data_section = jingle_add_data_section(&jingle, HELLO_WORLD, strlen(HELLO_WORLD));
 
-        jingle_add_code(&jingle, TEST_PROGRAM, TEST_PROGRAM_SIZE, &sh.sh_offset);
-        Elf64_Section shndx = jingle_add_section(&jingle, sh, ".text");
+    /// Add the program's symbols
+    Elf64_Sym message = {
+        .st_info = (STB_LOCAL << 4) | STT_NOTYPE,
+        .st_shndx = data_section,
+    };
+    jingle_add_symbol(&jingle, message, "message");
 
-        Elf64_Sym sym = {
-            .st_shndx = shndx,
-            .st_value = 0,
-            .st_size = 0,
-            .st_info = (STB_GLOBAL << 4) | (STT_FUNC)
-        };
-        jingle_add_symbol(&jingle, sym, "_start");
-    }
+    Elf64_Sym start = {
+        .st_info = (STB_GLOBAL << 4) | STT_FUNC,
+        .st_shndx = text_section,
+    };
+    jingle_add_symbol(&jingle, start, "_start");
 
-    {
-        Elf64_Section shndx = jingle_add_symtab(&jingle);
-        arrlast(jingle.shs).sh_link = shndx + 1;
-        jingle_add_strtab(&jingle);
-    }
-
-    jingle_add_shstrtab(&jingle);
-
-    printf("[INFO] Generating "OUTPUT_FILE"\n");
-
+    /// Write all of the data we've created to the file
     jingle_fini(&jingle);
     jingle_write_to_file(&jingle, f);
 
-    ds_free(&jingle.code);
-    ds_free(&jingle.strtab);
-    ds_free(&jingle.shstrtab);
+    /// Cleanup
+    string_free(&jingle.code);
+    string_free(&jingle.strtab);
+    string_free(&jingle.shstrtab);
 
     if (f) {
         fclose(f);
@@ -133,14 +125,16 @@ test_jingle_read()
                 fprintcs(stdout, file.data + sh->sh_offset, sh->sh_size);
             } else if (sh->sh_type == SHT_SYMTAB) {
                 printf("  Section header string table index: %d\n", sh->sh_link);
-                printf("  Data:\n");
-                for (size_t i = 0; i <= sh->sh_info; ++i) {
+                printf("  Symbols:\n");
+                assert(sh->sh_size % sh->sh_entsize == 0);
+                for (size_t i = 0; i < sh->sh_size / sh->sh_entsize; ++i) {
                     Elf64_Sym *sym = (Elf64_Sym *)(file.data + sh->sh_offset + sh->sh_entsize * i);
                     jingle_print_symbol(sym, stdout);
                     if (sym->st_name != 0) {
+                        // Get the string table that is linked with this symbol table
                         Elf64_Shdr *strtab_sh = ELF64_SHDR(file.data, sh->sh_link);
                         char *str = &(file.data + strtab_sh->sh_offset)[sym->st_name];
-                        printf("    Name: '%s'\n", str);
+                        printf("    Name: %s\n", str);
                     }
                 }
             } else if (sh->sh_type == SHT_PROGBITS) {

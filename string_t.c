@@ -10,25 +10,28 @@
 typedef struct {
     char  *data;
     size_t count;
-} string_t;
-
-typedef struct {
-    char *data;
-    size_t count;
     size_t capacity;
-} dstring_t;
+} string_t;
 
 string_t string_from_file(FILE *stream);
 string_t string_from_cstr(char *src);
-string_t string_from_dstring(dstring_t ds);
 string_t string_alloc(size_t n);
 void string_free(string_t *s);
 
-char *ds_appendn(dstring_t *ds, char *src, size_t n);
-char *ds_appends(dstring_t *ds, char *src);
-void  ds_appendc(dstring_t *ds, char c);
-char *ds_rewind(dstring_t *ds, size_t n);
-void  ds_free(dstring_t *ds);
+size_t string_grow(string_t *s, size_t addlen, size_t min_cap);
+size_t string_appendn(string_t *s, char *src, size_t n);
+size_t string_append(string_t *s, char *src);
+size_t string_appendc(string_t *s, char c);
+char *string_rewind(string_t *s, size_t n);
+
+#ifndef STRING_T_NO_SHORT_NAMES
+
+#define append(s, src) string_append(s, src)
+#define appendn(s, src, n) string_appendn(s, src, n)
+#define appendc(s, c) string_appendc(s, c)
+#define rewind(s, n) string_rewind(s, n)
+
+#endif // STRING_T_NO_SHORT_NAMES
 
 /// Functions for reading an entire file into memory
 
@@ -72,7 +75,7 @@ string_from_cstr(char *src)
 }
 
 string_t
-string_from_dstring(dstring_t ds)
+string_from_string(string_t ds)
 {
     string_t s;
     s.data = ds.data;
@@ -97,57 +100,73 @@ string_free(string_t *s)
     s->count = 0;
 }
 
-#define DS_GROW(capacity) ((capacity) < 8 ? 8 : (capacity) * 2)
-
-char *
-ds_appendn(dstring_t *ds, char *src, size_t n)
+size_t
+string_grow(string_t *s, size_t addlen, size_t min_cap)
 {
-    if (ds->count + n >= ds->capacity) {
-        ds->capacity = DS_GROW(ds->capacity);
-        ds->data = realloc(ds->data, ds->capacity);
+    size_t min_len = s->count + addlen;
+
+    if (min_len > min_cap)
+        min_cap = min_len;
+
+    if (min_cap <= s->capacity)
+        return s->capacity;
+
+    if (min_cap < 2 * s->capacity)
+        min_cap = 2 * s->capacity;
+    else if (min_cap < 4)
+        min_cap = 4;
+
+    char *new_ptr = realloc(s->data, min_cap);
+    if (new_ptr == NULL) {
+        // Not enough memory to realloc()
+        fprintf(stderr, "[ERROR] Not enough memory to allocate %lu bytes\n", addlen);
+        exit(1);
+    }
+    s->data = new_ptr;
+
+    return min_cap;
+}
+
+size_t
+string_appendn(string_t *s, char *src, size_t n)
+{
+    if (s->count + n >= s->capacity) {
+        s->capacity = string_grow(s, n, 8);
     }
 
-    char *dst = ds->data + ds->count;
-    memcpy(dst, src, n);
-    ds->count += n;
+    size_t result = s->count;
+    memcpy(s->data + s->count, src, n);
+    s->count += n;
 
-    return dst;
+    return result;
 }
 
-char *
-ds_appends(dstring_t *ds, char *src)
+size_t
+string_append(string_t *s, char *src)
 {
-    return ds_appendn(ds, src, strlen(src));
+    return string_appendn(s, src, strlen(src));
 }
 
-void
-ds_appendc(dstring_t *ds, char c)
+size_t
+string_appendc(string_t *s, char c)
 {
-    if (ds->count + 1 >= ds->capacity) {
-        ds->capacity = DS_GROW(ds->capacity);
-        ds->data = realloc(ds->data, ds->capacity);
+    if (s->count + 1 >= s->capacity) {
+        s->capacity = string_grow(s, 1, 8);
     }
 
-    ds->data[ds->count++] = c;
+    size_t result = s->count;
+    s->data[s->count++] = c;
+    return result;
 }
 
-#undef DS_GROW
-
 char *
-ds_rewind(dstring_t *ds, size_t n)
+string_rewind(string_t *s, size_t n)
 {
-    assert(n <= ds->count);
-    char *dst = ds->data + ds->count - n;
+    assert(n <= s->count);
+    char *dst = s->data + s->count - n;
     memset(dst, 0, n);
+    s->count -= n;
     return dst;
-}
-
-void
-ds_free(dstring_t *ds)
-{
-    if (ds->data != NULL) free(ds->data);
-    ds->data = NULL;
-    ds->count = 0;
 }
 
 /* This function returns one of the READALL_ constants above.
