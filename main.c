@@ -8,7 +8,7 @@
 #include "stb_ds.h"
 
 #define OUTPUT_FILE "output.o"
-#define INPUT_FILE "hello_world.o"
+#define INPUT_FILE "ret.o"
 
 #define TEST_PROGRAM_SIZE 23
 
@@ -45,25 +45,31 @@ test_jingle_write()
     Jingle jingle = {0};
     jingle_init(&jingle, EM_X86_64, ELFOSABI_SYSV);
 
+    /// If the symbol table contains any local symbols, the second entry of the symbol table is an STT_FILE symbol giving the name of the file.
+
+    jingle_add_file_symbol(&jingle, "output.ax");
+
     /// Add sections
     Elf64_Section text_section = jingle_add_text_section(&jingle, TEST_PROGRAM, TEST_PROGRAM_SIZE);
     Elf64_Section data_section = jingle_add_data_section(&jingle, HELLO_WORLD, strlen(HELLO_WORLD));
 
     /// Add the program's symbols
     Elf64_Sym message = {
-        .st_info = (STB_LOCAL << 4) | STT_NOTYPE,
+        .st_info = ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
         .st_shndx = data_section,
     };
     jingle_add_symbol(&jingle, message, "message");
 
+    /// The global symbols immediately follow the local symbols in the symbol table. The first global symbol is identified by the symbol table sh_info value. Local and global symbols are always kept separate in this manner, and cannot be mixed together.
+
     Elf64_Sym start = {
-        .st_info = (STB_GLOBAL << 4) | STT_FUNC,
+        .st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
         .st_shndx = text_section,
     };
-    jingle_add_symbol(&jingle, start, "_start");
+    Elf64_Word global = jingle_add_symbol(&jingle, start, "_start");
 
     /// Write all of the data we've created to the file
-    jingle_fini(&jingle);
+    jingle_fini(&jingle, global);
     jingle_write_to_file(&jingle, f);
 
     /// Cleanup
@@ -125,16 +131,19 @@ test_jingle_read()
                 fprintcs(stdout, file.data + sh->sh_offset, sh->sh_size);
             } else if (sh->sh_type == SHT_SYMTAB) {
                 printf("  Section header string table index: %d\n", sh->sh_link);
-                printf("  Symbols:\n");
+                printf("   Num:    Value Size    Type   Bind       Vis    Ndx Name\n");
                 assert(sh->sh_size % sh->sh_entsize == 0);
                 for (size_t i = 0; i < sh->sh_size / sh->sh_entsize; ++i) {
+                    printf("   %3lu: ", i);
                     Elf64_Sym *sym = (Elf64_Sym *)(file.data + sh->sh_offset + sh->sh_entsize * i);
                     jingle_print_symbol(sym, stdout);
                     if (sym->st_name != 0) {
                         // Get the string table that is linked with this symbol table
                         Elf64_Shdr *strtab_sh = ELF64_SHDR(file.data, sh->sh_link);
                         char *str = &(file.data + strtab_sh->sh_offset)[sym->st_name];
-                        printf("    Name: %s\n", str);
+                        printf("%s\n", str);
+                    } else {
+                        printf("\n");
                     }
                 }
             } else if (sh->sh_type == SHT_PROGBITS) {

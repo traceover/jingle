@@ -146,34 +146,33 @@ static const char *STT_NAMES[STT_NUM] = {
 };
 
 void
-fprint_shndx(FILE *stream, int ndx)
+SHNDX_NAMES(char *str, int ndx)
 {
+    sprintf(str, "%d", 42);
+
     switch (ndx) {
     case SHN_UNDEF:
-        fprintf(stream, "UNDEF");
+        sprintf(str, "UNDEF");
         break;
     case SHN_ABS:
-        fprintf(stream, "ABS");
+        sprintf(str, "ABS");
         break;
     case SHN_COMMON:
-        fprintf(stream, "COMMON");
+        sprintf(str, "COMMON");
         break;
     case SHN_XINDEX:
-        fprintf(stream, "XINDEX");
+        sprintf(str, "XINDEX");
         break;
     default:
-        fprintf(stream, "%u", ndx);
+        sprintf(str, "%u", ndx);
     }
 }
 
 void
 jingle_print_symbol(Elf64_Sym *sym, FILE *stream)
 {
-    fprintf(stream, "  Symbol:\n");
-    fprintf(stream, "    Value: %lu\n", sym->st_value);
-    fprintf(stream, "    Size: %lu\n", sym->st_size);
-    fprintf(stream, "    Type: %s\n", STT_NAMES[ELF64_ST_TYPE(sym->st_info)]);
-    fprintf(stream, "    Bind: %s\n", STB_NAMES[ELF64_ST_BIND(sym->st_info)]);
-    fprintf(stream, "    Visibility: %s\n", STV_NAMES[sym->st_other]);
-    fprintf(stream, "    Section header index: "); fprint_shndx(stream, sym->st_shndx); fputc('\n', stream);
+    char str[16]; // For sprintf
+    SHNDX_NAMES(str, sym->st_shndx);
+
+    fprintf(stream, "%8lu %4lu %7s %6s %9s %6s ", sym->st_value, sym->st_size, STT_NAMES[ELF64_ST_TYPE(sym->st_info)], STB_NAMES[ELF64_ST_BIND(sym->st_info)], STV_NAMES[sym->st_other], str);
 }

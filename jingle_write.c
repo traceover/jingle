@@ -57,11 +57,24 @@ jingle_add_string(Jingle *jingle, string_t *s, char *src)
     return result;
 }
 
-void
+Elf64_Word
 jingle_add_symbol(Jingle *jingle, Elf64_Sym sym, char *name)
 {
-    sym.st_name = jingle_add_string(jingle, &jingle->strtab, name);
+    if (name != NULL) sym.st_name = jingle_add_string(jingle, &jingle->strtab, name);
+
+    Elf64_Word result = arrlen(jingle->syms);
     arrput(jingle->syms, sym);
+    return result;
+}
+
+void
+jingle_add_file_symbol(Jingle *jingle, char *name)
+{
+    Elf64_Sym sym = {
+        .st_info = (STB_LOCAL << 4) | STT_FILE,
+        .st_shndx = SHN_ABS,
+    };
+    jingle_add_symbol(jingle, sym, name);
 }
 
 /// Functions for adding various different types of section headers
@@ -81,7 +94,7 @@ jingle_add_section(Jingle *jingle, Elf64_Shdr sh, char *name)
 }
 
 Elf64_Section
-jingle_add_symtab(Jingle *jingle)
+jingle_add_symtab(Jingle *jingle, Elf64_Word global_index)
 {
     Elf64_Shdr symtab_sh = {
         .sh_type = SHT_SYMTAB,
@@ -89,7 +102,7 @@ jingle_add_symtab(Jingle *jingle)
         .sh_entsize = sizeof(Elf64_Sym),
         .sh_link = jingle->eh.e_shnum + 1, // Link to the next section
         .sh_size = sizeof(Elf64_Sym) * arrlen(jingle->syms),
-        .sh_info = arrlen(jingle->syms),
+        .sh_info = global_index
     };
 
     Elf64_Section result = jingle_add_section(jingle, symtab_sh, ".symtab");
@@ -131,7 +144,15 @@ jingle_add_text_section(Jingle *jingle, char *code, size_t code_size)
     };
 
     jingle_add_code(jingle, code, code_size, &sh.sh_offset);
-    return jingle_add_section(jingle, sh, ".text");
+    Elf64_Section result = jingle_add_section(jingle, sh, ".text");
+
+    Elf64_Sym sym = {
+        .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
+        .st_shndx = result,
+    };
+    jingle_add_symbol(jingle, sym, NULL);
+
+    return result;
 }
 
 Elf64_Section
@@ -144,7 +165,16 @@ jingle_add_data_section(Jingle *jingle, char *data, size_t data_size)
     };
 
     jingle_add_code(jingle, data, data_size, &sh.sh_offset);
-    return jingle_add_section(jingle, sh, ".data");
+    Elf64_Section result = jingle_add_section(jingle, sh, ".data");
+
+    Elf64_Sym sym = {
+        .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
+        .st_shndx = result,
+    };
+    jingle_add_symbol(jingle, sym, NULL);
+
+    return result;
+
 }
 
 /// Functions for initializing Jingle and writing ELF to a file
@@ -181,14 +211,19 @@ jingle_init(Jingle *jingle, uint16_t e_machine, unsigned char ei_osabi)
     // eh.e_shnum = 0;
     jingle->eh.e_shstrndx = SHN_UNDEF;
 
+    // Add null section
     Elf64_Shdr sh = {0};
     jingle_add_section(jingle, sh, NULL);
+
+    // Add null symbol
+    Elf64_Sym sym = {0};
+    arrput(jingle->syms, sym);
 }
 
 void
-jingle_fini(Jingle *jingle)
+jingle_fini(Jingle *jingle, Elf64_Word global_index)
 {
-    jingle_add_symtab(jingle);
+    jingle_add_symtab(jingle, global_index);
     jingle_add_shstrtab(jingle);
     jingle->eh.e_shoff = JINGLE_SHDRS(jingle);
 }
