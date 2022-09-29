@@ -7,11 +7,6 @@
 #include "string_t.c"
 #include "stb_ds.h"
 
-/// Some useful macros for accessing the various parts of an ELF file.
-#define ELF64_EHDR(contents)    (Elf64_Ehdr *)(contents)
-#define ELF64_PHDR(contents, i) (Elf64_Phdr *)((contents) + (((Elf64_Ehdr *)(contents))->e_phoff + ((Elf64_Ehdr *)(contents))->e_phentsize * (i)))
-#define ELF64_SHDR(contents, i) (Elf64_Shdr *)((contents) + (((Elf64_Ehdr *)(contents))->e_shoff + ((Elf64_Ehdr *)(contents))->e_shentsize * (i)))
-
 typedef struct {
     Elf64_Ehdr eh;
     Elf64_Phdr *phs;

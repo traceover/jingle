@@ -7,21 +7,35 @@
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
+#define FLAG_IMPLEMENTATION
+#include "flag.h"
+
 #define OUTPUT_FILE "output.o"
-#define INPUT_FILE "ret.o"
+#define INPUT_FILE "hello.o"
 
-#define TEST_PROGRAM_SIZE 23
+#define ARRLEN(arr) ((sizeof(arr) / sizeof((arr)[0])))
 
-static char TEST_PROGRAM[TEST_PROGRAM_SIZE] = {
-    0x55,
-    0x48, 0x89, 0xe5,
-    0x48, 0xc7, 0xc7,    0, 0, 0, 0,
-    0x48, 0xc7, 0xc0, 0x3c, 0, 0, 0,
-    0x0f, 0x05,
-    0x90,
-    0x5d,
-    0xc3
+static char TEST_PROGRAM2[] = {
+    0xb8, 0x01, 0, 0, 0,          // mov $0x1,%eax
+    0xbf, 0x01, 0, 0, 0,          // mov $0x1,%edi
+    0x48, 0xc7, 0xc6, 0, 0, 0, 0, // mov $0x0,%rsi
+    0xba, 0x0d, 0, 0, 0,          // mov $0xd,%edx
+    0x0f, 0x05,                   // syscall
+    0xb8, 0x3c, 0, 0, 0,          // mov $0x3c,%eax
+    0x48, 0x31, 0xff,             // xor %rdi,%rdi
+    0x0f, 0x05                    // syscall
 };
+
+/*static char TEST_PROGRAM[] = {
+    0x55,                       // push ebp
+    0x48, 0x89, 0xe5,           // mov %rsp,%rbp
+    0x48, 0xc7, 0xc7,    0, 0, 0, 0, // mov $0x0,%rdi
+    0x48, 0xc7, 0xc0, 0x3c, 0, 0, 0, // mov $0x3c,%rax
+    0x0f, 0x05,                 //syscall
+    0x90,                       // nop
+    0x5d,                       // pop %rbp
+    0xc3                        // ret
+    };*/
 
 static char HELLO_WORLD[] = "Hello, World\n";
 
@@ -50,7 +64,7 @@ test_jingle_write()
     jingle_add_file_symbol(&jingle, "output.ax");
 
     /// Add sections
-    Elf64_Section text_section = jingle_add_text_section(&jingle, TEST_PROGRAM, TEST_PROGRAM_SIZE);
+    Elf64_Section text_section = jingle_add_text_section(&jingle, TEST_PROGRAM2, ARRLEN(TEST_PROGRAM2));
     Elf64_Section data_section = jingle_add_data_section(&jingle, HELLO_WORLD, strlen(HELLO_WORLD));
 
     /// Add the program's symbols
@@ -58,7 +72,7 @@ test_jingle_write()
         .st_info = ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
         .st_shndx = data_section,
     };
-    jingle_add_symbol(&jingle, message, "message");
+    jingle_add_symbol(&jingle, message, "msg");
 
     /// The global symbols immediately follow the local symbols in the symbol table. The first global symbol is identified by the symbol table sh_info value. Local and global symbols are always kept separate in this manner, and cannot be mixed together.
 
@@ -83,74 +97,125 @@ test_jingle_write()
 }
 
 void
-test_jingle_read()
+usage(FILE *stream) {
+    fprintf(stream, "Usage: ./main [OPTIONS] [--] <INPUT FILE>\n");
+    fprintf(stream, "OPTIONS:\n");
+    flag_print_options(stream);
+}
+
+void
+test_jingle_read(int argc, char **argv)
 {
-    FILE *f = fopen(INPUT_FILE, "r");
+    bool *display_symtab = flag_bool("-syms", false, "Display the symbol table");
+    bool *display_file_header = flag_bool("-header", false, "Display the ELF file header");
+    bool *display_sections = flag_bool("-sections", false, "Display the section headers");
+    uint64_t *display_contents = flag_uint64("-contents", 0, "Display the contents of a section");
+
+    if (!flag_parse(argc, argv)) {
+        usage(stderr);
+        flag_print_error(stderr);
+        exit(1);
+    }
+
+    int rest_argc = flag_rest_argc();
+    char **rest_argv = flag_rest_argv();
+
+    if (rest_argc <= 0) {
+        usage(stderr);
+        fprintf(stderr, "[ERROR] No input files provided\n");
+        exit(1);
+    }
+
+    char *input_file = rest_argv[0];
+
+    FILE *f = fopen(input_file, "r");
     if (!f) {
-        jingle_err_exit(__FUNCTION__, "Could not open file `"INPUT_FILE"`");
+        fprintf(stderr, "[ERROR] Could not open file '%s'\n", input_file);
+        exit(1);
     }
 
     string_t file = string_from_file(f);
-    printf("[INFO] Read %zu bytes from "INPUT_FILE"\n", file.count);
+    printf("[INFO] Read %zu bytes from '%s'\n", file.count, input_file);
 
-    if (
-        (unsigned char)file.data[EI_MAG0] == 0x7f &&
-        (unsigned char)file.data[EI_MAG1] == 'E' &&
-        (unsigned char)file.data[EI_MAG2] == 'L' &&
-        (unsigned char)file.data[EI_MAG3] == 'F'
-        ) {
-        printf("[INFO] Yes, this is an ELF file!\n");
+    if (!jingle_is_elf(file)) {
+        fprintf(stderr, "[ERROR] '%s' is not a valid ELF file (doesn't start with magic number 0x7f E L F)\n", input_file);
+        exit(1);
     }
 
+    // TODO: 32 bits
     if ((unsigned char)file.data[EI_CLASS] != ELFCLASS64) {
         fprintf(stderr, "[ERROR] We don't know how to handle 32 bit programs yet!\n");
         return;
     }
 
-    // Read data from the elf header
-    Elf64_Ehdr *eh = ELF64_EHDR(file.data);
-    jingle_print_elf_header(eh, file, stdout);
+    string_t shstrtab = jingle_read_shstrtab(file);
 
-    string_t strtab;
-    {
-        Elf64_Shdr *sh = ELF64_SHDR(file.data, eh->e_shstrndx);
-        strtab.data = (file.data + sh->sh_offset);
-        strtab.count = sh->sh_size;
+    /// Display the symbol table
+    if (*display_symtab) {
+        Jingle_Symtab symtab = jingle_read_symtab(file);
+
+        printf("Symbol table '%s' contains %lu entries:\n", &shstrtab.data[symtab.sh_name], symtab.count);
+        printf("        Value Size    Type   Bind       Vis    Ndx Name\n");
+        for (size_t i = 0; i < symtab.count; ++i) {
+            printf("[%2lu] ", i);
+            Elf64_Sym sym = symtab.data[i];
+            jingle_print_symbol(&sym, stdout);
+            printf("%s\n", &symtab.names[sym.st_name]);
+        }
     }
-    assert(strtab.data != NULL);
 
-    printf("Section headers (%d):\n", eh->e_shnum);
-    for (size_t i = 0; i < eh->e_shnum; ++i) {
-        Elf64_Shdr *sh = ELF64_SHDR(file.data, i);
-        fprintf(stdout, "[%2zu] ", i);
-        jingle_print_section_header(sh, strtab, stdout);
+    /// Display the ELF header
+    Elf64_Ehdr *eh = ELF64_EHDR(file.data);
+    if (*display_file_header) jingle_print_elf_header(eh, file, stdout);
 
-        if (sh->sh_size > 0) {
-            if (sh->sh_type == SHT_STRTAB) {
-                printf("  Data: ");
-                fprintcs(stdout, file.data + sh->sh_offset, sh->sh_size);
-            } else if (sh->sh_type == SHT_SYMTAB) {
-                printf("  Section header string table index: %d\n", sh->sh_link);
-                printf("   Num:    Value Size    Type   Bind       Vis    Ndx Name\n");
-                assert(sh->sh_size % sh->sh_entsize == 0);
-                for (size_t i = 0; i < sh->sh_size / sh->sh_entsize; ++i) {
-                    printf("   %3lu: ", i);
-                    Elf64_Sym *sym = (Elf64_Sym *)(file.data + sh->sh_offset + sh->sh_entsize * i);
-                    jingle_print_symbol(sym, stdout);
-                    if (sym->st_name != 0) {
-                        // Get the string table that is linked with this symbol table
-                        Elf64_Shdr *strtab_sh = ELF64_SHDR(file.data, sh->sh_link);
-                        char *str = &(file.data + strtab_sh->sh_offset)[sym->st_name];
-                        printf("%s\n", str);
-                    } else {
-                        printf("\n");
+    /// Display the section headers
+    if (*display_sections) {
+        printf("Section header table contains %d entries:\n", eh->e_shnum);
+        printf("     Type     Flags Offset   Size     Name\n");
+        for (size_t i = 0; i < eh->e_shnum; ++i) {
+            Elf64_Shdr *sh = ELF64_SHDR(file.data, i);
+            fprintf(stdout, "[%2zu] ", i);
+            jingle_print_section_header(sh, shstrtab, stdout);
+
+            if (sh->sh_size > 0) {
+                switch (sh->sh_type) {
+                case SHT_STRTAB:
+                    break; // @Unfinished @Nocommit
+                    printf("  Data: ");
+                    fprintcs(stdout, file.data + sh->sh_offset, sh->sh_size);
+                    break;
+                case SHT_PROGBITS:
+                    break; // @Unfinished @Nocommit
+                    printf("  Data: ");
+                    printb(file.data, sh->sh_offset, sh->sh_size);
+                    break;
+                case SHT_REL: {
+                    break; // @Unfinished @Nocommit
+                    assert(sh->sh_size % sh->sh_entsize == 0);
+                    for (size_t i = 0; i < sh->sh_size / sh->sh_entsize; ++i) {
+                        Elf64_Rel *rel = (Elf64_Rel *)(file.data + sh->sh_offset + sh->sh_entsize * i);
+                        jingle_print_rel(rel, stdout);
                     }
+                } break;
+                case SHT_RELA: {
+                    break; // @Unfinished @Nocommit
+                    assert(sh->sh_size % sh->sh_entsize == 0);
+                    for (size_t i = 0; i < sh->sh_size / sh->sh_entsize; ++i) {
+                        Elf64_Rela *rela = (Elf64_Rela *)(file.data + sh->sh_offset + sh->sh_entsize * i);
+                        jingle_print_rela(rela, stdout);
+                    }
+                } break;
+                default:
                 }
-            } else if (sh->sh_type == SHT_PROGBITS) {
-                printf("  Data: ");
-                printb(file.data, sh->sh_offset, sh->sh_size);
             }
         }
+    }
+
+    /// Display the contents of a specific section
+    if (*display_contents != 0) {
+        Elf64_Shdr *sh = ELF64_SHDR(file.data, *display_contents);
+        printf("Contents of section '%s' contains %lu bytes\n", &shstrtab.data[sh->sh_name], sh->sh_size);
+        printb(file.data, sh->sh_offset, sh->sh_size);
     }
 
     if (file.data != NULL) {
@@ -168,5 +233,5 @@ main(int argc, char **argv) {
     (void)argv;
 
     test_jingle_write();
-    test_jingle_read();
+    test_jingle_read(argc, argv);
 }

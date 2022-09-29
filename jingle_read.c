@@ -1,6 +1,8 @@
 #include <elf.h>
 #include <stdio.h>
-#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <assert.h>
 
 #include "string_t.c"
 
@@ -31,6 +33,71 @@ fprintb(FILE *stream, char *buffer, size_t start, size_t n)
 static void
 printb(char *buffer, size_t start, size_t n) {
     fprintb(stdout, buffer, start, n);
+}
+
+bool
+jingle_is_elf(string_t file)
+{
+    return (
+        (unsigned char)file.data[EI_MAG0] == 0x7f &&
+        (unsigned char)file.data[EI_MAG1] == 'E' &&
+        (unsigned char)file.data[EI_MAG2] == 'L' &&
+        (unsigned char)file.data[EI_MAG3] == 'F'
+        );
+}
+
+/// Some useful macros for accessing the various parts of an ELF file.
+
+#define ELF64_EHDR(contents)    (Elf64_Ehdr *)(contents)
+#define ELF64_PHDR(contents, i) (Elf64_Phdr *)((contents) + (((Elf64_Ehdr *)(contents))->e_phoff + ((Elf64_Ehdr *)(contents))->e_phentsize * (i)))
+#define ELF64_SHDR(contents, i) (Elf64_Shdr *)((contents) + (((Elf64_Ehdr *)(contents))->e_shoff + ((Elf64_Ehdr *)(contents))->e_shentsize * (i)))
+
+/// Functions to read common sections
+
+typedef struct {
+    Elf64_Sym *data;
+    size_t count;
+    size_t sh_name;
+    char *names;
+} Jingle_Symtab;
+
+Jingle_Symtab
+jingle_read_symtab(string_t file)
+{
+    Jingle_Symtab s = {0};
+
+    Elf64_Ehdr *eh = (Elf64_Ehdr *)file.data;
+    for (size_t i = 0; i < eh->e_shnum; ++i) {
+        Elf64_Shdr *sh = ELF64_SHDR(file.data, i);
+        if (sh->sh_type == SHT_SYMTAB) {
+            assert(sh->sh_offset < file.count);
+            s.data = (Elf64_Sym *)(file.data + sh->sh_offset);
+            s.count = sh->sh_size / sh->sh_entsize;
+            s.sh_name = sh->sh_name;
+
+            Elf64_Shdr *strtab_sh = ELF64_SHDR(file.data, sh->sh_link);
+            s.names = file.data + strtab_sh->sh_offset;
+
+            return s;
+        }
+    }
+
+    return s;
+}
+
+string_t
+jingle_read_shstrtab(string_t file)
+{
+    string_t s;
+
+    Elf64_Ehdr *eh = ELF64_EHDR(file.data);
+    Elf64_Shdr *sh = ELF64_SHDR(file.data, eh->e_shstrndx);
+
+    assert(sh->sh_offset < file.count);
+    s.data = (file.data + sh->sh_offset);
+    s.count = sh->sh_size;
+
+    return s;
 }
 
 static const char *ET_NAMES[ET_NUM] = {
@@ -84,42 +151,41 @@ jingle_print_elf_header(Elf64_Ehdr *eh, string_t file, FILE *stream)
 }
 
 static const char *SHT_NAMES[SHT_NUM] = {
-    [SHT_NULL] = "SHT_NULL",
-    [SHT_PROGBITS] = "SHT_PROGBITS",
-    [SHT_SYMTAB] = "SHT_SYMTAB",
-    [SHT_STRTAB] = "SHT_STRTAB",
-    [SHT_RELA] = "SHT_RELA",
-    [SHT_HASH] = "SHT_HASH",
-    [SHT_DYNAMIC] = "SHT_DYNAMIC",
-    [SHT_NOTE] = "SHT_NOTE",
-    [SHT_NOBITS] = "SHT_NOBITS",
-    [SHT_REL] = "SHT_REL",
-    [SHT_SHLIB] = "SHT_SHLIB",
-    [SHT_DYNSYM] = "SHT_DYNSYM",
-    [SHT_INIT_ARRAY] = "SHT_INIT_ARRAY",
-    [SHT_FINI_ARRAY] = "SHT_FINI_ARRAY",
-    [SHT_PREINIT_ARRAY] = "SHT_PREINIT_ARRAY",
-    [SHT_GROUP] = "SHT_GROUP",
-    [SHT_SYMTAB_SHNDX] = "SHT_SYMTAB_SHNDX",
-    [SHT_RELR] = "SHT_RELR",
+    [SHT_NULL] = "NULL",
+    [SHT_PROGBITS] = "PROGBITS",
+    [SHT_SYMTAB] = "SYMTAB",
+    [SHT_STRTAB] = "STRTAB",
+    [SHT_RELA] = "RELA",
+    [SHT_HASH] = "HASH",
+    [SHT_DYNAMIC] = "DYNAMIC",
+    [SHT_NOTE] = "NOTE",
+    [SHT_NOBITS] = "NOBITS",
+    [SHT_REL] = "REL",
+    [SHT_SHLIB] = "SHLIB",
+    [SHT_DYNSYM] = "DYNSYM",
+    [SHT_INIT_ARRAY] = "INIT_ARRAY",
+    [SHT_FINI_ARRAY] = "FINI_ARRAY",
+    [SHT_PREINIT_ARRAY] = "PREINIT_ARRAY",
+    [SHT_GROUP] = "GROUP",
+    [SHT_SYMTAB_SHNDX] = "SYMTAB_SHNDX",
+    [SHT_RELR] = "RELR",
 };
 
 void
 jingle_print_section_header(Elf64_Shdr *sh, string_t strtab, FILE *stream)
 {
+    fprintf(stream, "%-8s %s%s%s   %-8lu %-8lu ",
+            SHT_NAMES[sh->sh_type],
+            (sh->sh_flags & SHF_WRITE      ? "W" : "."),
+            (sh->sh_flags & SHF_ALLOC      ? "A" : "."),
+            (sh->sh_flags & SHF_EXECINSTR  ? "X" : "."),
+            sh->sh_offset,
+            sh->sh_size);
     if (sh->sh_type != SHT_NULL) {
-        fprintf(stream, "%s:\n", &strtab.data[sh->sh_name]);
+        fprintf(stream, "%s\n", &strtab.data[sh->sh_name]);
     } else {
-        fprintf(stream, "(null):\n");
+        fprintf(stream, "\n");
     }
-    fprintf(stream, "  Type: %s\n", SHT_NAMES[sh->sh_type]);
-    fprintf(stream, "  Flags: 0x%lx\n", sh->sh_flags);
-    if (sh->sh_flags != 0) fprintf(stream, "    %s%s%s\n",
-            (sh->sh_flags & SHF_WRITE      ? "W" : " "),
-            (sh->sh_flags & SHF_ALLOC      ? "A" : " "),
-            (sh->sh_flags & SHF_EXECINSTR  ? "X" : " "));
-    fprintf(stream, "  Start of data: %lu (bytes into file)\n", sh->sh_offset);
-    fprintf(stream, "  Number of bytes of data: %lu\n", sh->sh_size);
 }
 
 static const char *STV_NAMES[4] = {
@@ -175,4 +241,71 @@ jingle_print_symbol(Elf64_Sym *sym, FILE *stream)
     SHNDX_NAMES(str, sym->st_shndx);
 
     fprintf(stream, "%8lu %4lu %7s %6s %9s %6s ", sym->st_value, sym->st_size, STT_NAMES[ELF64_ST_TYPE(sym->st_info)], STB_NAMES[ELF64_ST_BIND(sym->st_info)], STV_NAMES[sym->st_other], str);
+}
+
+/*static const char *R_68K_NAMES[R_68K_NUM] = {
+
+  };*/
+
+static const char *R_386_NAMES[R_386_NUM] = {
+    [R_386_NONE]          = "NONE",
+    [R_386_32]            = "32",
+    [R_386_PC32]          = "PC32",
+    [R_386_GOT32]         = "GOT32",
+    [R_386_PLT32]         = "PLT32",
+    [R_386_COPY]          = "COPY",
+    [R_386_GLOB_DAT]      = "GLOB_DAT",
+    [R_386_JMP_SLOT]      = "JMP_SLOT",
+    [R_386_RELATIVE]      = "RELATIVE",
+    [R_386_GOTOFF]        = "GOTOFF",
+    [R_386_GOTPC]         = "GOTPC",
+    [R_386_32PLT]         = "32PLT",
+    [R_386_TLS_TPOFF]     = "TLS_TPOFF",
+    [R_386_TLS_IE]        = "TLS_IE",
+    [R_386_TLS_GOTIE]     = "TLS_GOTIE",
+    [R_386_TLS_LE]        = "TLS_LE",
+    [R_386_TLS_GD]        = "TLS_GD",
+    [R_386_TLS_LDM]       = "TLS_LDM",
+    [R_386_16]            = "16",
+    [R_386_PC16]          = "PC16",
+    [R_386_8]             = "8",
+    [R_386_PC8]           = "PC8",
+    [R_386_TLS_GD_32]     = "TLS_GD_32",
+    [R_386_TLS_GD_PUSH]   = "TLS_GD_PUSH",
+    [R_386_TLS_GD_CALL]   = "TLS_GD_CALL",
+    [R_386_TLS_GD_POP]    = "TLS_GD_POP",
+    [R_386_TLS_LDM_32]    = "TLS_LDM_32",
+    [R_386_TLS_LDM_CALL]  = "TLS_LDM_CALL",
+    [R_386_TLS_LDM_POP]   = "TLS_LDM_POP",
+    [R_386_TLS_LDO_32]    = "TLS_LDO_32",
+    [R_386_TLS_IE_32]     = "TLS_IE_32",
+    [R_386_TLS_LE_32]     = "TLS_LE_32",
+    [R_386_TLS_DTPMOD32]  = "TLS_DTPMOD32",
+    [R_386_TLS_DTPOFF32]  = "TLS_DTPOFF32",
+    [R_386_TLS_TPOFF32]   = "TLS_TPOFF32",
+    [R_386_SIZE32]        = "SIZE32",
+    [R_386_TLS_GOTDESC]   = "TLS_GOTDESC",
+    [R_386_TLS_DESC_CALL] = "TLS_DESC_CALL",
+    [R_386_TLS_DESC]      = "TLS_DESC",
+    [R_386_IRELATIVE]     = "IRELATIVE",
+    [R_386_GOT32X]        = "GOT32X",
+};
+
+void
+jingle_print_rel(Elf64_Rel *rel, FILE *stream)
+{
+    fprintf(stream, "  Rel:\n");
+    fprintf(stream, "    Offset: %lu\n", rel->r_offset);
+    fprintf(stream, "    Type: %s\n", R_386_NAMES[ELF64_R_TYPE(rel->r_info)]); // TODO: Different R_X_ based on arch
+    fprintf(stream, "    Sym: %lu\n", ELF64_R_SYM(rel->r_info));
+}
+
+void
+jingle_print_rela(Elf64_Rela *rela, FILE *stream)
+{
+    fprintf(stream, "  Rela:\n");
+    fprintf(stream, "    Offset: %lu\n", rela->r_offset);
+    fprintf(stream, "    Type: %s\n", R_386_NAMES[ELF64_R_TYPE(rela->r_info)]); // TODO: Different R_X_ based on arch
+    fprintf(stream, "    Sym: %lu\n", ELF64_R_SYM(rela->r_info));
+    fprintf(stream, "    Addend: %lu\n", rela->r_addend);
 }
