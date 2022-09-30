@@ -82,6 +82,15 @@ test_jingle_write()
     };
     Elf64_Word global = jingle_add_symbol(&jingle, start, "_start");
 
+    /// Add the relocation entries
+
+    /*Elf64_Rela rela = {
+        .r_offset = 0,
+        .r_info = ELF64_R_INFO(0, 0), // sym, type
+        .r_addend = 0,
+    };
+    jingle_add_rela(&jingle, rela);*/
+
     /// Write all of the data we've created to the file
     jingle_fini(&jingle, global);
     jingle_write_to_file(&jingle, f);
@@ -110,6 +119,7 @@ test_jingle_read(int argc, char **argv)
     bool *display_file_header = flag_bool("-header", false, "Display the ELF file header");
     bool *display_sections = flag_bool("-sections", false, "Display the section headers");
     uint64_t *display_contents = flag_uint64("-contents", 0, "Display the contents of a section");
+    bool *display_reloc = flag_bool("-reloc", false, "Display the relocation entries");
 
     if (!flag_parse(argc, argv)) {
         usage(stderr);
@@ -149,18 +159,36 @@ test_jingle_read(int argc, char **argv)
     }
 
     string_t shstrtab = jingle_read_shstrtab(file);
+    Jingle_Symtab symtab = jingle_read_symtab(file);
 
     /// Display the symbol table
     if (*display_symtab) {
-        Jingle_Symtab symtab = jingle_read_symtab(file);
-
-        printf("Symbol table '%s' contains %lu entries:\n", &shstrtab.data[symtab.sh_name], symtab.count);
+        printf("\nSymbol table '%s' contains %lu entries:\n", &shstrtab.data[symtab.sh_name], symtab.count);
         printf("        Value Size    Type   Bind       Vis    Ndx Name\n");
         for (size_t i = 0; i < symtab.count; ++i) {
             printf("[%2lu] ", i);
             Elf64_Sym sym = symtab.data[i];
             jingle_print_symbol(&sym, stdout);
-            printf("%s\n", &symtab.names[sym.st_name]);
+            if (ELF64_ST_TYPE(sym.st_info) == STT_SECTION) {
+                /// If the symbol type is SECTION, the name can be found from the section itself
+                Elf64_Shdr *sh = ELF64_SHDR(file.data, sym.st_shndx);
+                printf("%s\n", &shstrtab.data[sh->sh_name]);
+            } else {
+                printf("%s\n", &symtab.names[sym.st_name]);
+            }
+        }
+    }
+
+    /// Display the relocation entries
+    if (*display_reloc) {
+        Jingle_Rela relatab = jingle_read_rela(file);
+
+        printf("\nRelocation table '%s' contains %lu entries:\n", &shstrtab.data[relatab.sh_name], relatab.count);
+        printf("     Offset           Type            Value\n");
+        for (size_t i = 0; i < relatab.count; ++i) {
+            printf("[%2lu] ", i);
+            Elf64_Rela rela = relatab.data[i];
+            jingle_print_rela(&rela, file, shstrtab, symtab, stdout);
         }
     }
 
@@ -170,7 +198,7 @@ test_jingle_read(int argc, char **argv)
 
     /// Display the section headers
     if (*display_sections) {
-        printf("Section header table contains %d entries:\n", eh->e_shnum);
+        printf("\nSection header table contains %d entries:\n", eh->e_shnum);
         printf("     Type     Flags Offset   Size     Name\n");
         for (size_t i = 0; i < eh->e_shnum; ++i) {
             Elf64_Shdr *sh = ELF64_SHDR(file.data, i);
@@ -202,7 +230,7 @@ test_jingle_read(int argc, char **argv)
                     assert(sh->sh_size % sh->sh_entsize == 0);
                     for (size_t i = 0; i < sh->sh_size / sh->sh_entsize; ++i) {
                         Elf64_Rela *rela = (Elf64_Rela *)(file.data + sh->sh_offset + sh->sh_entsize * i);
-                        jingle_print_rela(rela, stdout);
+                        jingle_print_rela(rela, file, shstrtab, symtab, stdout);
                     }
                 } break;
                 default:
@@ -214,7 +242,7 @@ test_jingle_read(int argc, char **argv)
     /// Display the contents of a specific section
     if (*display_contents != 0) {
         Elf64_Shdr *sh = ELF64_SHDR(file.data, *display_contents);
-        printf("Contents of section '%s' contains %lu bytes\n", &shstrtab.data[sh->sh_name], sh->sh_size);
+        printf("Contents of section '%s'\n", &shstrtab.data[sh->sh_name]);
         printb(file.data, sh->sh_offset, sh->sh_size);
     }
 

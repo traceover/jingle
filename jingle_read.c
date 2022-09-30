@@ -66,7 +66,7 @@ jingle_read_symtab(string_t file)
 {
     Jingle_Symtab s = {0};
 
-    Elf64_Ehdr *eh = (Elf64_Ehdr *)file.data;
+    Elf64_Ehdr *eh = ELF64_EHDR(file.data);
     for (size_t i = 0; i < eh->e_shnum; ++i) {
         Elf64_Shdr *sh = ELF64_SHDR(file.data, i);
         if (sh->sh_type == SHT_SYMTAB) {
@@ -83,6 +83,31 @@ jingle_read_symtab(string_t file)
     }
 
     return s;
+}
+
+typedef struct {
+    Elf64_Rela *data;
+    size_t count;
+    size_t sh_name;
+} Jingle_Rela;
+
+Jingle_Rela
+jingle_read_rela(string_t file)
+{
+    Jingle_Rela r = {0};
+
+    Elf64_Ehdr *eh = ELF64_EHDR(file.data);
+    for (size_t i = 0; i < eh->e_shnum; ++i) {
+        Elf64_Shdr *sh = ELF64_SHDR(file.data, i);
+        if (sh->sh_type == SHT_RELA) {
+            assert(sh->sh_offset < file.count);
+            r.data = (Elf64_Rela *)(file.data + sh->sh_offset);
+            r.count = sh->sh_size / sh->sh_entsize;
+            r.sh_name = sh->sh_name;
+        }
+    }
+
+    return r;
 }
 
 string_t
@@ -291,6 +316,49 @@ static const char *R_386_NAMES[R_386_NUM] = {
     [R_386_GOT32X]        = "GOT32X",
 };
 
+static const char *R_X86_64_NAMES[R_X86_64_NUM] = {
+    [R_X86_64_NONE]            = "NONE",
+    [R_X86_64_64]              = "64",
+    [R_X86_64_PC32]            = "PC32",
+    [R_X86_64_GOT32]           = "GOT32",
+    [R_X86_64_PLT32]           = "PLT32",
+    [R_X86_64_COPY]            = "COPY",
+    [R_X86_64_GLOB_DAT]        = "GLOB_DAT",
+    [R_X86_64_JUMP_SLOT]       = "JUMP_SLOT",
+    [R_X86_64_RELATIVE]        = "RELATIVE",
+    [R_X86_64_GOTPCREL]        = "GOTPCREL",
+    [R_X86_64_32]              = "32",
+    [R_X86_64_32S]             = "32S",
+    [R_X86_64_16]              = "16",
+    [R_X86_64_PC16]            = "PC16",
+    [R_X86_64_8]               = "8",
+    [R_X86_64_PC8]             = "PC8",
+    [R_X86_64_DTPMOD64]        = "DTPMOD64",
+    [R_X86_64_DTPOFF64]        = "DTPOFF64",
+    [R_X86_64_TPOFF64]         = "TPOFF64",
+    [R_X86_64_TLSGD]           = "TLSGD",
+    [R_X86_64_TLSLD]           = "TLSLD",
+    [R_X86_64_DTPOFF32]        = "DTPOFF32",
+    [R_X86_64_GOTTPOFF]        = "GOTTPOFF",
+    [R_X86_64_PC64]            = "PC64",
+    [R_X86_64_GOTOFF64]        = "GOTOFF64",
+    [R_X86_64_GOTPC32]         = "GOTPC32",
+    [R_X86_64_GOT64]           = "GOT64",
+    [R_X86_64_GOTPCREL64]      = "GOTPCREL64",
+    [R_X86_64_GOTPC64]         = "GOTPC64",
+    [R_X86_64_GOTPLT64]        = "GOTPLT64",
+    [R_X86_64_PLTOFF64]        = "PLTOFF64",
+    [R_X86_64_SIZE32]          = "SIZE32",
+    [R_X86_64_SIZE64]          = "SIZE64",
+    [R_X86_64_GOTPC32_TLSDESC] = "GOTPC32_TLSDESC",
+    [R_X86_64_TLSDESC_CALL]    = "TLSDESC_CALL",
+    [R_X86_64_TLSDESC]         = "TLSDESC",
+    [R_X86_64_IRELATIVE]       = "IRELATIVE",
+    [R_X86_64_RELATIVE64]      = "RELATIVE64",
+    [R_X86_64_GOTPCRELX]       = "GOTPCRELX",
+    [R_X86_64_REX_GOTPCRELX]   = "REX_GOTPCRELX",
+};
+
 void
 jingle_print_rel(Elf64_Rel *rel, FILE *stream)
 {
@@ -301,11 +369,18 @@ jingle_print_rel(Elf64_Rel *rel, FILE *stream)
 }
 
 void
-jingle_print_rela(Elf64_Rela *rela, FILE *stream)
+jingle_print_rela(Elf64_Rela *rela, string_t file, string_t shstrtab, Jingle_Symtab symtab, FILE *stream)
 {
-    fprintf(stream, "  Rela:\n");
-    fprintf(stream, "    Offset: %lu\n", rela->r_offset);
-    fprintf(stream, "    Type: %s\n", R_386_NAMES[ELF64_R_TYPE(rela->r_info)]); // TODO: Different R_X_ based on arch
-    fprintf(stream, "    Sym: %lu\n", ELF64_R_SYM(rela->r_info));
-    fprintf(stream, "    Addend: %lu\n", rela->r_addend);
+    /// r_offset = This member gives the location at which to apply the relocation action. For a relocatable file, the value is the byte offset from the beginning of the section to the storage unit affected by the relocation. For an executable file or a shared object, the value is the virtual address of the storage unit affected by the relocation.
+    /// R_SYM(r_info) = The symbol table index with respect to which the relocation must be made.
+    /// R_TYPE(r_info) = The type of relocation to apply.
+
+    // Elf64_Shdr *sh = ELF64_SHDR(file.data, ELF64_R_SYM(rela->r_info));
+
+    Elf64_Sym sym = symtab.data[ELF64_R_SYM(rela->r_info)];
+    assert(ELF64_ST_TYPE(sym.st_info) == STT_SECTION);
+
+    Elf64_Shdr *sh = ELF64_SHDR(file.data, sym.st_shndx);
+
+    fprintf(stream, "%016lu %-15s %s + %lx\n", rela->r_offset, R_X86_64_NAMES[ELF64_R_TYPE(rela->r_info)], &shstrtab.data[sh->sh_name], rela->r_addend);
 }
