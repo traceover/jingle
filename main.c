@@ -16,14 +16,14 @@
 #define ARRLEN(arr) ((sizeof(arr) / sizeof((arr)[0])))
 
 static char TEST_PROGRAM2[] = {
-    0xb8, 0x01, 0, 0, 0,          // mov $0x1,%eax
-    0xbf, 0x01, 0, 0, 0,          // mov $0x1,%edi
-    0x48, 0xc7, 0xc6, 0, 0, 0, 0, // mov $0x0,%rsi
-    0xba, 0x0d, 0, 0, 0,          // mov $0xd,%edx
-    0x0f, 0x05,                   // syscall
-    0xb8, 0x3c, 0, 0, 0,          // mov $0x3c,%eax
-    0x48, 0x31, 0xff,             // xor %rdi,%rdi
-    0x0f, 0x05                    // syscall
+    0x48, 0xc7, 0xc0, 0x01, 0, 0, 0, // mov $0x1,%eax
+    0x48, 0xc7, 0xc7, 0x01, 0, 0, 0, // mov $0x1,%edi
+    0x48, 0xc7, 0xc6,    0, 0, 0, 0, // mov $0x0,%rsi
+    0x48, 0xc7, 0xc2, 0x0d, 0, 0, 0, // mov $0xd,%edx
+    0x0f, 0x05,                      // syscall
+    0x48, 0xc7, 0xc0, 0x3c, 0, 0, 0, // mov $0x3c,%eax
+    0x48, 0x31, 0xff,                // xor %rdi,%rdi
+    0x0f, 0x05                       // syscall
 };
 
 /*static char TEST_PROGRAM[] = {
@@ -40,8 +40,9 @@ static char TEST_PROGRAM2[] = {
 static char HELLO_WORLD[] = "Hello, World\n";
 
 static void
-fprintcs(FILE *stream, char *data, size_t count)
+print_chars(char *data, size_t count, FILE *stream)
 {
+    fprintf(stream, "%.*s", (int)count, data);
     for (size_t i = 0; i < count; ++i) {
         fprintf(stream, "%c", data[i]);
     }
@@ -67,6 +68,8 @@ test_jingle_write()
     Elf64_Section text_section = jingle_add_text_section(&jingle, TEST_PROGRAM2, ARRLEN(TEST_PROGRAM2));
     Elf64_Section data_section = jingle_add_data_section(&jingle, HELLO_WORLD, strlen(HELLO_WORLD));
 
+    Elf64_Word data_section_symbol = jingle_add_section_symbol(&jingle, data_section, NULL);
+
     /// Add the program's symbols
     Elf64_Sym message = {
         .st_info = ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
@@ -82,17 +85,29 @@ test_jingle_write()
     };
     Elf64_Word global = jingle_add_symbol(&jingle, start, "_start");
 
-    /// Add the relocation entries
+    // TODO: readelf: Warning: [ 3]: Link field (0) should index a symtab section.
+    // TODO: I think we should have a function called jingle_set_layout() where you specify all the sections so that the values can be used easily
+    //            Jingle_Layout layout = {
+    //                ".text", ".rela.text", ".data",
+    //            };
+    //            jingle_set_layout(&jingle, layout);
 
-    /*Elf64_Rela rela = {
-        .r_offset = 0,
-        .r_info = ELF64_R_INFO(0, 0), // sym, type
+    //            jingle_set_section(&jingle, layout[".text"], ...);
+
+    // TODO: use stb_hashmap for the above ^^^
+
+    /// Add the relocation entries
+    Elf64_Rela rela = {
+        .r_offset = 17, // offset where the address should be relocated to
+        .r_info = ELF64_R_INFO(data_section_symbol, R_X86_64_32S),
         .r_addend = 0,
     };
-    jingle_add_rela(&jingle, rela);*/
+    jingle_add_rela(&jingle, rela);
+
+    // jingle_add_rela_section(&jingle, text_section);
 
     /// Write all of the data we've created to the file
-    jingle_fini(&jingle, global);
+    jingle_fini(&jingle, text_section, global);
     jingle_write_to_file(&jingle, f);
 
     /// Cleanup
@@ -204,46 +219,18 @@ test_jingle_read(int argc, char **argv)
             Elf64_Shdr *sh = ELF64_SHDR(file.data, i);
             fprintf(stdout, "[%2zu] ", i);
             jingle_print_section_header(sh, shstrtab, stdout);
-
-            if (sh->sh_size > 0) {
-                switch (sh->sh_type) {
-                case SHT_STRTAB:
-                    break; // @Unfinished @Nocommit
-                    printf("  Data: ");
-                    fprintcs(stdout, file.data + sh->sh_offset, sh->sh_size);
-                    break;
-                case SHT_PROGBITS:
-                    break; // @Unfinished @Nocommit
-                    printf("  Data: ");
-                    printb(file.data, sh->sh_offset, sh->sh_size);
-                    break;
-                case SHT_REL: {
-                    break; // @Unfinished @Nocommit
-                    assert(sh->sh_size % sh->sh_entsize == 0);
-                    for (size_t i = 0; i < sh->sh_size / sh->sh_entsize; ++i) {
-                        Elf64_Rel *rel = (Elf64_Rel *)(file.data + sh->sh_offset + sh->sh_entsize * i);
-                        jingle_print_rel(rel, stdout);
-                    }
-                } break;
-                case SHT_RELA: {
-                    break; // @Unfinished @Nocommit
-                    assert(sh->sh_size % sh->sh_entsize == 0);
-                    for (size_t i = 0; i < sh->sh_size / sh->sh_entsize; ++i) {
-                        Elf64_Rela *rela = (Elf64_Rela *)(file.data + sh->sh_offset + sh->sh_entsize * i);
-                        jingle_print_rela(rela, file, shstrtab, symtab, stdout);
-                    }
-                } break;
-                default:
-                }
-            }
         }
     }
 
     /// Display the contents of a specific section
     if (*display_contents != 0) {
         Elf64_Shdr *sh = ELF64_SHDR(file.data, *display_contents);
-        printf("Contents of section '%s'\n", &shstrtab.data[sh->sh_name]);
-        printb(file.data, sh->sh_offset, sh->sh_size);
+        printf("\nContents of section '%s':\n", &shstrtab.data[sh->sh_name]);
+        if (sh->sh_type == SHT_STRTAB) {
+            print_chars(file.data + sh->sh_offset, sh->sh_size, stdout);
+        } else {
+            printb(file.data, sh->sh_offset, sh->sh_size);
+        }
     }
 
     if (file.data != NULL) {

@@ -375,8 +375,6 @@ jingle_print_rela(Elf64_Rela *rela, string_t file, string_t shstrtab, Jingle_Sym
     /// R_SYM(r_info) = The symbol table index with respect to which the relocation must be made.
     /// R_TYPE(r_info) = The type of relocation to apply.
 
-    // Elf64_Shdr *sh = ELF64_SHDR(file.data, ELF64_R_SYM(rela->r_info));
-
     Elf64_Sym sym = symtab.data[ELF64_R_SYM(rela->r_info)];
     assert(ELF64_ST_TYPE(sym.st_info) == STT_SECTION);
 

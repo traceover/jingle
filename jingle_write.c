@@ -12,6 +12,7 @@ typedef struct {
     Elf64_Phdr *phs;
     Elf64_Shdr *shs;
     Elf64_Sym *syms;
+    Elf64_Rela *rela;
     string_t code;
     string_t strtab;
     string_t shstrtab;
@@ -27,7 +28,8 @@ typedef struct {
 #define JINGLE_CODE(j)     ((j)->eh.e_ehsize)
 #define JINGLE_STRTAB(j)   (JINGLE_CODE(j) + (j)->code.count)
 #define JINGLE_SYMTAB(j)   (JINGLE_STRTAB(j) + (j)->strtab.count)
-#define JINGLE_SHSTRTAB(j) (JINGLE_SYMTAB(j) + sizeof(Elf64_Sym) * arrlen((j)->syms))
+#define JINGLE_RELATAB(j)  (JINGLE_SYMTAB(j) + sizeof(Elf64_Sym) * arrlen((j)->syms))
+#define JINGLE_SHSTRTAB(j) (JINGLE_RELATAB(j) + sizeof(Elf64_Rela) * arrlen((j)->rela))
 #define JINGLE_PHDRS(j)    (JINGLE_SHSTRTAB(j) + (j)->shstrtab.count)
 #define JINGLE_SHDRS(j)    (JINGLE_PHDRS(j) + (j)->eh.e_phentsize * (j)->eh.e_phnum)
 
@@ -36,7 +38,7 @@ typedef struct {
 void
 jingle_add_code(Jingle *jingle, char *src, size_t n, size_t *offset)
 {
-    *offset = jingle->eh.e_ehsize + jingle->code.count;
+    *offset = JINGLE_CODE(jingle) + jingle->code.count;
     appendn(&jingle->code, src, n);
 }
 
@@ -66,10 +68,16 @@ void
 jingle_add_file_symbol(Jingle *jingle, char *name)
 {
     Elf64_Sym sym = {
-        .st_info = (STB_LOCAL << 4) | STT_FILE,
+        .st_info = ELF64_ST_INFO(STB_LOCAL, STT_FILE),
         .st_shndx = SHN_ABS,
     };
     jingle_add_symbol(jingle, sym, name);
+}
+
+void
+jingle_add_rela(Jingle *jingle, Elf64_Rela rela)
+{
+    arrput(jingle->rela, rela);
 }
 
 /// Functions for adding various different types of section headers
@@ -81,9 +89,8 @@ jingle_add_section(Jingle *jingle, Elf64_Shdr sh, char *name)
         sh.sh_name = jingle_add_string(jingle, &jingle->shstrtab, name);
     }
 
+    Elf64_Section result = arrlen(jingle->shs);
     arrput(jingle->shs, sh);
-    Elf64_Section result = jingle->eh.e_shnum;
-    jingle->eh.e_shnum++;
 
     return result;
 }
@@ -95,7 +102,7 @@ jingle_add_symtab(Jingle *jingle, Elf64_Word global_index)
         .sh_type = SHT_SYMTAB,
         .sh_offset = JINGLE_SYMTAB(jingle),
         .sh_entsize = sizeof(Elf64_Sym),
-        .sh_link = jingle->eh.e_shnum + 1, // Link to the next section
+        .sh_link = arrlen(jingle->shs) + 1, // Link to the next section
         .sh_size = sizeof(Elf64_Sym) * arrlen(jingle->syms),
         .sh_info = global_index
     };
@@ -139,15 +146,7 @@ jingle_add_text_section(Jingle *jingle, char *code, size_t code_size)
     };
 
     jingle_add_code(jingle, code, code_size, &sh.sh_offset);
-    Elf64_Section result = jingle_add_section(jingle, sh, ".text");
-
-    Elf64_Sym sym = {
-        .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
-        .st_shndx = result,
-    };
-    jingle_add_symbol(jingle, sym, NULL);
-
-    return result;
+    return jingle_add_section(jingle, sh, ".text");
 }
 
 Elf64_Section
@@ -160,16 +159,33 @@ jingle_add_data_section(Jingle *jingle, char *data, size_t data_size)
     };
 
     jingle_add_code(jingle, data, data_size, &sh.sh_offset);
-    Elf64_Section result = jingle_add_section(jingle, sh, ".data");
+    return jingle_add_section(jingle, sh, ".data");
+}
 
+Elf64_Section
+jingle_add_rela_section(Jingle *jingle, Elf64_Section info, Elf64_Section link)
+{
+    Elf64_Shdr sh = {
+        .sh_type = SHT_RELA,
+        // .sh_flags = SHF_ALLOC | SHF_WRITE,
+        .sh_entsize = sizeof(Elf64_Rela),
+        .sh_size = sizeof(Elf64_Rela) * arrlen(jingle->rela),
+        .sh_offset = JINGLE_RELATAB(jingle),
+        .sh_link = link,
+        .sh_info = info
+    };
+
+    return jingle_add_section(jingle, sh, ".rela.text");
+}
+
+Elf64_Word
+jingle_add_section_symbol(Jingle *jingle, Elf64_Section section, char *name)
+{
     Elf64_Sym sym = {
         .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
-        .st_shndx = result,
+        .st_shndx = section,
     };
-    jingle_add_symbol(jingle, sym, NULL);
-
-    return result;
-
+    return jingle_add_symbol(jingle, sym, name);
 }
 
 /// Functions for initializing Jingle and writing ELF to a file
@@ -216,10 +232,12 @@ jingle_init(Jingle *jingle, uint16_t e_machine, unsigned char ei_osabi)
 }
 
 void
-jingle_fini(Jingle *jingle, Elf64_Word global_index)
+jingle_fini(Jingle *jingle, Elf64_Section text, Elf64_Word global_index)
 {
+    if (arrlen(jingle->rela)) jingle_add_rela_section(jingle, text, arrlen(jingle->shs)+1);
     jingle_add_symtab(jingle, global_index);
     jingle_add_shstrtab(jingle);
+    jingle->eh.e_shnum = arrlen(jingle->shs);
     jingle->eh.e_shoff = JINGLE_SHDRS(jingle);
 }
 
@@ -240,6 +258,7 @@ jingle_write_to_file(Jingle *jingle, FILE *stream)
     fwrite(jingle->code.data, 1, jingle->code.count, stream);
     fwrite(jingle->strtab.data, 1, jingle->strtab.count, stream);
     fwrite(jingle->syms, sizeof(Elf64_Sym), arrlen(jingle->syms), stream);
+    fwrite(jingle->rela, sizeof(Elf64_Rela), arrlen(jingle->rela), stream);
     fwrite(jingle->shstrtab.data, 1, jingle->shstrtab.count, stream);
     fwrite(jingle->shs, jingle->eh.e_shentsize, arrlen(jingle->shs), stream);
 }
