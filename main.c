@@ -77,7 +77,7 @@ test_jingle_write()
     jingle_fini(&jingle);
 
     FILE *f = fopen(OUTPUT_FILE, "w");
-    if (f != NULL) {
+    if (f == NULL) {
         jingle_err_exit(__FUNCTION__, "Failed to write file `"OUTPUT_FILE"`");
     }
 
