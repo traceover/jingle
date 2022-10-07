@@ -3,41 +3,23 @@
 
 #define STRING_T_IMPLEMENTATION
 #include "string_t.c"
-
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
-
 #define FLAG_IMPLEMENTATION
 #include "flag.h"
 
 #define OUTPUT_FILE "output.o"
 #define INPUT_FILE "hello.o"
 
+#ifndef MACHINE
+#define MACHINE EM_X86_64
+#endif
+
+#ifndef OSABI
+#define OSABI ELFOSABI_SYSV
+#endif
+
 #define ARRLEN(arr) ((sizeof(arr) / sizeof((arr)[0])))
-
-static char TEST_PROGRAM2[] = {
-    0x48, 0xc7, 0xc0, 0x01, 0, 0, 0, // mov $0x1,%eax
-    0x48, 0xc7, 0xc7, 0x01, 0, 0, 0, // mov $0x1,%edi
-    0x48, 0xc7, 0xc6,    0, 0, 0, 0, // mov $0x0,%rsi
-    0x48, 0xc7, 0xc2, 0x0d, 0, 0, 0, // mov $0xd,%edx
-    0x0f, 0x05,                      // syscall
-    0x48, 0xc7, 0xc0, 0x3c, 0, 0, 0, // mov $0x3c,%eax
-    0x48, 0x31, 0xff,                // xor %rdi,%rdi
-    0x0f, 0x05                       // syscall
-};
-
-/*static char TEST_PROGRAM[] = {
-    0x55,                       // push ebp
-    0x48, 0x89, 0xe5,           // mov %rsp,%rbp
-    0x48, 0xc7, 0xc7,    0, 0, 0, 0, // mov $0x0,%rdi
-    0x48, 0xc7, 0xc0, 0x3c, 0, 0, 0, // mov $0x3c,%rax
-    0x0f, 0x05,                 //syscall
-    0x90,                       // nop
-    0x5d,                       // pop %rbp
-    0xc3                        // ret
-    };*/
-
-static char HELLO_WORLD[] = "Hello, World\n";
 
 static void
 print_chars(char *data, size_t count, FILE *stream)
@@ -49,54 +31,42 @@ print_chars(char *data, size_t count, FILE *stream)
     fprintf(stream, "\n");
 }
 
+static char test_program[] = {
+    0x48, 0xc7, 0xc0, 0x01, 0, 0, 0, // mov $0x1,%eax
+    0x48, 0xc7, 0xc7, 0x01, 0, 0, 0, // mov $0x1,%edi
+    0x48, 0xc7, 0xc6,    0, 0, 0, 0, // mov $0x0,%rsi
+    0x48, 0xc7, 0xc2, 0x0d, 0, 0, 0, // mov $0xd,%edx
+    0x0f, 0x05,                      // syscall
+    0x48, 0xc7, 0xc0, 0x3c, 0, 0, 0, // mov $0x3c,%eax
+    0x48, 0x31, 0xff,                // xor %rdi,%rdi
+    0x0f, 0x05                       // syscall
+};
+
 void
 test_jingle_write()
 {
-    FILE *f = fopen(OUTPUT_FILE, "w");
-    if (!f) {
-        jingle_err_exit(__FUNCTION__, "Could not open file `"OUTPUT_FILE"`");
-    }
-
     Jingle jingle = {0};
-    jingle_init(&jingle, EM_X86_64, ELFOSABI_SYSV);
+    jingle_init(&jingle, MACHINE, OSABI);
 
-    /// If the symbol table contains any local symbols, the second entry of the symbol table is an STT_FILE symbol giving the name of the file.
+    // The file which local symbols come from
+    jingle_add_symbol(&jingle, SHN_ABS, "dummy.c", ELF64_ST_INFO(STB_LOCAL, STT_FILE));
 
-    jingle_add_file_symbol(&jingle, "output.ax");
+    Jingle_Section TEXT     = jingle_add_section(&jingle, ".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR);
+    jingle_add_section_symbol(&jingle, TEXT);
+    Jingle_Section DATA     = jingle_add_section(&jingle, ".data", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE);
+    Jingle_Symbol data_section_symbol = jingle_add_section_symbol(&jingle, DATA);
+    jingle_add_rela_section(&jingle, TEXT); // Copy something from DATA into TEXT
 
-    /// Add sections
-    Elf64_Section text_section = jingle_add_text_section(&jingle, TEST_PROGRAM2, ARRLEN(TEST_PROGRAM2));
-    Elf64_Section data_section = jingle_add_data_section(&jingle, HELLO_WORLD, strlen(HELLO_WORLD));
+    string_t code = string_from_parts(test_program, sizeof(test_program));
+    jingle_set_code(&jingle, TEXT, code);
 
-    Elf64_Word data_section_symbol = jingle_add_section_symbol(&jingle, data_section, NULL);
+    string_t data = string_from_cstr("Hello, World\n");
+    jingle_set_code(&jingle, DATA, data);
 
-    /// Add the program's symbols
-    Elf64_Sym message = {
-        .st_info = ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
-        .st_shndx = data_section,
-    };
-    jingle_add_symbol(&jingle, message, "msg");
+    // Add symbols
+    jingle_add_symbol(&jingle, DATA, "msg", ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE));
+    jingle_add_global(&jingle, TEXT, "_start");
 
-    /// The global symbols immediately follow the local symbols in the symbol table. The first global symbol is identified by the symbol table sh_info value. Local and global symbols are always kept separate in this manner, and cannot be mixed together.
-
-    Elf64_Sym start = {
-        .st_info = ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
-        .st_shndx = text_section,
-    };
-    Elf64_Word global = jingle_add_symbol(&jingle, start, "_start");
-
-    // TODO: readelf: Warning: [ 3]: Link field (0) should index a symtab section.
-    // TODO: I think we should have a function called jingle_set_layout() where you specify all the sections so that the values can be used easily
-    //            Jingle_Layout layout = {
-    //                ".text", ".rela.text", ".data",
-    //            };
-    //            jingle_set_layout(&jingle, layout);
-
-    //            jingle_set_section(&jingle, layout[".text"], ...);
-
-    // TODO: use stb_hashmap for the above ^^^
-
-    /// Add the relocation entries
     Elf64_Rela rela = {
         .r_offset = 17, // offset where the address should be relocated to
         .r_info = ELF64_R_INFO(data_section_symbol, R_X86_64_32S),
@@ -104,20 +74,23 @@ test_jingle_write()
     };
     jingle_add_rela(&jingle, rela);
 
-    // jingle_add_rela_section(&jingle, text_section);
+    jingle_fini(&jingle);
 
-    /// Write all of the data we've created to the file
-    jingle_fini(&jingle, text_section, global);
-    jingle_write_to_file(&jingle, f);
-
-    /// Cleanup
-    string_free(&jingle.code);
-    string_free(&jingle.strtab);
-    string_free(&jingle.shstrtab);
-
-    if (f) {
-        fclose(f);
+    FILE *f = fopen(OUTPUT_FILE, "w");
+    if (f != NULL) {
+        jingle_err_exit(__FUNCTION__, "Failed to write file `"OUTPUT_FILE"`");
     }
+
+    jingle_write(f, &jingle);
+    fclose(f);
+
+    string_free(&jingle.code);
+    string_free(&jingle.symbol_names);
+    string_free(&jingle.section_names);
+
+    arrfree(jingle.sections);
+    arrfree(jingle.symbols);
+    arrfree(jingle.reloc_entries);
 }
 
 void

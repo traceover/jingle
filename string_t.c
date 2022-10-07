@@ -15,6 +15,7 @@ typedef struct {
 
 string_t string_from_file(FILE *stream);
 string_t string_from_cstr(char *src);
+string_t string_from_parts(char *src, size_t n);
 string_t string_alloc(size_t n);
 void string_free(string_t *s);
 
@@ -75,11 +76,11 @@ string_from_cstr(char *src)
 }
 
 string_t
-string_from_string(string_t ds)
+string_from_parts(char *src, size_t n)
 {
     string_t s;
-    s.data = ds.data;
-    s.count = ds.count;
+    s.data = src;
+    s.count = n;
     return s;
 }
 
